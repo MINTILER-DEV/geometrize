@@ -33,6 +33,7 @@
 
 # Build Folders
 /build*
+/.codex
 
 # Per-use project config
 *.pro.user
