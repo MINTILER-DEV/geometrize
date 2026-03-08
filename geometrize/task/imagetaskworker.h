@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 
 #include <QObject>
@@ -13,6 +14,10 @@
 
 namespace geometrize
 {
+namespace gpu
+{
+class GpuEvaluator;
+}
 
 namespace task
 {
@@ -89,6 +94,8 @@ signals:
 private:
     ImageRunner m_runner;
     std::atomic<bool> m_working;
+    std::unique_ptr<geometrize::gpu::GpuEvaluator> m_gpuEvaluator;
+    std::uint32_t m_gpuSeedOffset;
 };
 
 }
