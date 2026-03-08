@@ -46,6 +46,7 @@ template<typename T> T clampValue(const T value, const T lo, const T hi)
 
 struct alignas(16) PackedCandidate final
 {
+    // std430-aligned shape payload consumed by shaders/evaluate_shapes.comp
     std::array<std::int32_t, 4> header{};
     std::array<std::int32_t, 4> bounds{};
     std::array<float, 4> params0{};
@@ -55,6 +56,7 @@ static_assert(sizeof(PackedCandidate) == 64, "Unexpected PackedCandidate layout"
 
 struct alignas(16) ReductionResult final
 {
+    // Packed output from shaders/error_reduce.comp (score/index/color/valid).
     float score = 1.0F;
     std::uint32_t index = 0U;
     std::uint32_t color = 0U;
@@ -204,6 +206,7 @@ public:
         m_gl->glDispatchCompute(candidateCount, 1, 1);
         m_gl->glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
+        // GPU-side reduction step: scan candidate scores and keep best index/color.
         m_gl->glUseProgram(m_reduceProgram);
         m_gl->glUniform1ui(m_reduceCandidateCountUniform, candidateCount);
         m_gl->glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_scoreBuffer);

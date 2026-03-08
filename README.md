@@ -72,6 +72,21 @@ Geometrize is a Qt app written in C++.
  * Download and install Qt 5.10 or above.
  * Install Python 3.x and add it to your path. The build process includes a few Python scripts for creating resource files.
  * Checkout this repository and all submodules, and build and run [geometrize.pro](https://github.com/Tw1ddle/geometrize/blob/master/geometrize.pro) within Qt Creator.
+
+### GPU evaluation path (experimental)
+
+This repository includes an OpenGL compute-shader candidate evaluator:
+
+ * `geometrize/src/gpu/GpuEvaluator.cpp` and `geometrize/src/gpu/GpuEvaluator.h`
+ * `shaders/evaluate_shapes.comp` and `shaders/error_reduce.comp`
+
+At runtime, `ImageTaskWorker` uses GPU batch scoring when available, and automatically falls back to the original CPU path when:
+
+ * compute shaders are unavailable
+ * script-provided custom energy functions are active
+ * unsupported shape types are encountered in the GPU evaluator
+
+Set `GEOMETRIZE_DISABLE_GPU=1` to force CPU evaluation.
  
 If you want to develop or extend Geometrize, look at the [top level repo](https://github.com/Tw1ddle/geometrize-top-level-repo) for a high-level overview of the repositories in the Geometrize project.
 
