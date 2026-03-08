@@ -43,6 +43,10 @@ INCLUDEPATH += $$PWD/lib/cereal/include \
 include($$PWD/lib/geometrize/geometrize/geometrize.pri)
 include($$PWD/lib/burstlinker/burstlinker.pri)
 
+# Copy compute shaders next to the executable for runtime loading.
+QMAKE_POST_LINK += $$QMAKE_MKDIR $$shell_quote($$OUT_PWD/shaders) $$escape_expand(\\n\\t)
+QMAKE_POST_LINK += $$QMAKE_COPY_DIR $$shell_quote($$PWD/shaders) $$shell_quote($$OUT_PWD) $$escape_expand(\\n\\t)
+
 # Optional support for WebSocket connections for sending and receiving
 # images/data. Uses Boost, see https://github.com/Tw1ddle/dataslinger-lib
 

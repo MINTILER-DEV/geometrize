@@ -1,0 +1,279 @@
+#version 430
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct CandidateShape {
+    ivec4 header;
+    ivec4 bounds;
+    vec4 params0;
+    vec4 params1;
+};
+
+layout(std430, binding = 0) readonly buffer CandidateBuffer {
+    CandidateShape candidates[];
+};
+layout(std430, binding = 1) buffer ScoreBuffer {
+    float scores[];
+};
+layout(std430, binding = 2) buffer ColorBuffer {
+    uint packedColors[];
+};
+layout(std430, binding = 3) buffer ValidBuffer {
+    uint valids[];
+};
+
+layout(binding = 0) uniform sampler2D uTargetTex;
+layout(binding = 1) uniform sampler2D uCurrentTex;
+
+uniform uint uCandidateCount;
+uniform uint uAlpha;
+uniform float uBaseScore;
+uniform float uRgbaCount;
+
+shared float sRed[64];
+shared float sGreen[64];
+shared float sBlue[64];
+shared float sCount[64];
+shared float sDelta[64];
+shared uvec4 sColor;
+
+bool insideTriangle(vec2 p, vec2 a, vec2 b, vec2 c)
+{
+    vec2 v0 = c - a;
+    vec2 v1 = b - a;
+    vec2 v2 = p - a;
+    float dot00 = dot(v0, v0);
+    float dot01 = dot(v0, v1);
+    float dot02 = dot(v0, v2);
+    float dot11 = dot(v1, v1);
+    float dot12 = dot(v1, v2);
+    float invDenom = 1.0 / max(dot00 * dot11 - dot01 * dot01, 1e-8);
+    float u = (dot11 * dot02 - dot01 * dot12) * invDenom;
+    float v = (dot00 * dot12 - dot01 * dot02) * invDenom;
+    return u >= 0.0 && v >= 0.0 && (u + v) <= 1.0;
+}
+
+vec2 rotatePoint(vec2 p, vec2 center, float angleDegrees)
+{
+    float rad = radians(angleDegrees);
+    float co = cos(rad);
+    float si = sin(rad);
+    vec2 d = p - center;
+    return vec2(d.x * co + d.y * si, -d.x * si + d.y * co);
+}
+
+bool insideShape(CandidateShape shape, vec2 p)
+{
+    int type = shape.header.x;
+    if(type == 1) {
+        float x1 = min(shape.params0.x, shape.params0.z);
+        float x2 = max(shape.params0.x, shape.params0.z);
+        float y1 = min(shape.params0.y, shape.params0.w);
+        float y2 = max(shape.params0.y, shape.params0.w);
+        return p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2;
+    }
+
+    if(type == 2) {
+        float x1 = min(shape.params0.x, shape.params0.z);
+        float x2 = max(shape.params0.x, shape.params0.z);
+        float y1 = min(shape.params0.y, shape.params0.w);
+        float y2 = max(shape.params0.y, shape.params0.w);
+        vec2 center = vec2((x1 + x2) * 0.5, (y1 + y2) * 0.5);
+        vec2 rp = rotatePoint(p, center, shape.params1.x);
+        return abs(rp.x) <= (x2 - x1) * 0.5 && abs(rp.y) <= (y2 - y1) * 0.5;
+    }
+
+    if(type == 4) {
+        vec2 a = vec2(shape.params0.x, shape.params0.y);
+        vec2 b = vec2(shape.params0.z, shape.params0.w);
+        vec2 c = vec2(shape.params1.x, shape.params1.y);
+        return insideTriangle(p, a, b, c);
+    }
+
+    if(type == 8) {
+        float rx = max(abs(shape.params0.z), 1e-4);
+        float ry = max(abs(shape.params0.w), 1e-4);
+        vec2 d = (p - shape.params0.xy) / vec2(rx, ry);
+        return dot(d, d) <= 1.0;
+    }
+
+    if(type == 16) {
+        float rx = max(abs(shape.params0.z), 1e-4);
+        float ry = max(abs(shape.params0.w), 1e-4);
+        vec2 rp = rotatePoint(p, shape.params0.xy, shape.params1.x);
+        vec2 d = rp / vec2(rx, ry);
+        return dot(d, d) <= 1.0;
+    }
+
+    if(type == 32) {
+        float r = max(abs(shape.params0.z), 1e-4);
+        vec2 d = p - shape.params0.xy;
+        return dot(d, d) <= r * r;
+    }
+
+    if(type == 64) {
+        vec2 a = shape.params0.xy;
+        vec2 b = shape.params0.zw;
+        vec2 ab = b - a;
+        float t = dot(p - a, ab) / max(dot(ab, ab), 1e-5);
+        t = clamp(t, 0.0, 1.0);
+        vec2 proj = a + ab * t;
+        vec2 delta = p - proj;
+        const float thickness = 1.5;
+        return dot(delta, delta) <= thickness * thickness;
+    }
+
+    return false;
+}
+
+uvec4 toU8(vec4 rgba)
+{
+    vec4 v = clamp(rgba * 255.0, vec4(0.0), vec4(255.0));
+    return uvec4(v + 0.5);
+}
+
+uvec4 blendPixel(uvec4 dst, uvec4 src)
+{
+    uint sr = src.r;
+    sr |= sr << 8;
+    sr = (sr * src.a) / 255u;
+    uint sg = src.g;
+    sg |= sg << 8;
+    sg = (sg * src.a) / 255u;
+    uint sb = src.b;
+    sb |= sb << 8;
+    sb = (sb * src.a) / 255u;
+    uint sa = src.a;
+    sa |= sa << 8;
+
+    const uint m = 65535u;
+    uint aa = (m - sa) * 257u;
+
+    uint r = (((dst.r * aa + sr * m) / m) >> 8u);
+    uint g = (((dst.g * aa + sg * m) / m) >> 8u);
+    uint b = (((dst.b * aa + sb * m) / m) >> 8u);
+    uint a = (((dst.a * aa + sa * m) / m) >> 8u);
+    return uvec4(r, g, b, a);
+}
+
+void main()
+{
+    uint candidateIndex = gl_WorkGroupID.x;
+    if(candidateIndex >= uCandidateCount) {
+        return;
+    }
+
+    uint lid = gl_LocalInvocationID.x;
+    CandidateShape shape = candidates[candidateIndex];
+
+    int minX = shape.header.y;
+    int minY = shape.header.z;
+    int maxX = shape.bounds.x;
+    int maxY = shape.bounds.y;
+    int w = max(0, maxX - minX + 1);
+    int h = max(0, maxY - minY + 1);
+    int pixelCount = w * h;
+
+    float localRed = 0.0;
+    float localGreen = 0.0;
+    float localBlue = 0.0;
+    float localCount = 0.0;
+
+    for(int i = int(lid); i < pixelCount; i += 64) {
+        int px = minX + (i % w);
+        int py = minY + (i / w);
+        vec2 p = vec2(float(px), float(py));
+        if(!insideShape(shape, p)) {
+            continue;
+        }
+
+        uvec4 t = toU8(texelFetch(uTargetTex, ivec2(px, py), 0));
+        uvec4 c = toU8(texelFetch(uCurrentTex, ivec2(px, py), 0));
+
+        float aScale = (257.0 * 255.0) / max(float(uAlpha), 1.0);
+        localRed += (float(int(t.r) - int(c.r)) * aScale + float(c.r) * 257.0);
+        localGreen += (float(int(t.g) - int(c.g)) * aScale + float(c.g) * 257.0);
+        localBlue += (float(int(t.b) - int(c.b)) * aScale + float(c.b) * 257.0);
+        localCount += 1.0;
+    }
+
+    sRed[lid] = localRed;
+    sGreen[lid] = localGreen;
+    sBlue[lid] = localBlue;
+    sCount[lid] = localCount;
+    barrier();
+
+    for(uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if(lid < stride) {
+            sRed[lid] += sRed[lid + stride];
+            sGreen[lid] += sGreen[lid + stride];
+            sBlue[lid] += sBlue[lid + stride];
+            sCount[lid] += sCount[lid + stride];
+        }
+        barrier();
+    }
+
+    if(lid == 0u) {
+        if(sCount[0] <= 0.0) {
+            sColor = uvec4(0u, 0u, 0u, uAlpha);
+            valids[candidateIndex] = 0u;
+            scores[candidateIndex] = 1e30;
+            packedColors[candidateIndex] = 0u;
+        } else {
+            uint r = uint(clamp((sRed[0] / sCount[0]) / 256.0, 0.0, 255.0));
+            uint g = uint(clamp((sGreen[0] / sCount[0]) / 256.0, 0.0, 255.0));
+            uint b = uint(clamp((sBlue[0] / sCount[0]) / 256.0, 0.0, 255.0));
+            sColor = uvec4(r, g, b, uAlpha);
+            valids[candidateIndex] = 1u;
+        }
+    }
+    barrier();
+
+    if(valids[candidateIndex] == 0u) {
+        return;
+    }
+
+    float delta = 0.0;
+    for(int i = int(lid); i < pixelCount; i += 64) {
+        int px = minX + (i % w);
+        int py = minY + (i / w);
+        vec2 p = vec2(float(px), float(py));
+        if(!insideShape(shape, p)) {
+            continue;
+        }
+
+        uvec4 t = toU8(texelFetch(uTargetTex, ivec2(px, py), 0));
+        uvec4 before = toU8(texelFetch(uCurrentTex, ivec2(px, py), 0));
+        uvec4 after = blendPixel(before, sColor);
+
+        int dtbr = int(t.r) - int(before.r);
+        int dtbg = int(t.g) - int(before.g);
+        int dtbb = int(t.b) - int(before.b);
+        int dtba = int(t.a) - int(before.a);
+
+        int dtar = int(t.r) - int(after.r);
+        int dtag = int(t.g) - int(after.g);
+        int dtab = int(t.b) - int(after.b);
+        int dtaa = int(t.a) - int(after.a);
+
+        int beforeErr = dtbr * dtbr + dtbg * dtbg + dtbb * dtbb + dtba * dtba;
+        int afterErr = dtar * dtar + dtag * dtag + dtab * dtab + dtaa * dtaa;
+        delta += float(afterErr - beforeErr);
+    }
+
+    sDelta[lid] = delta;
+    barrier();
+
+    for(uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if(lid < stride) {
+            sDelta[lid] += sDelta[lid + stride];
+        }
+        barrier();
+    }
+
+    if(lid == 0u) {
+        float baseTotal = (uBaseScore * 255.0) * (uBaseScore * 255.0) * uRgbaCount;
+        float total = max(baseTotal + sDelta[0], 0.0);
+        scores[candidateIndex] = sqrt(total / uRgbaCount) / 255.0;
+        packedColors[candidateIndex] = sColor.r | (sColor.g << 8) | (sColor.b << 16) | (sColor.a << 24);
+    }
+}
